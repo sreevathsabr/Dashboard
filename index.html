@@ -511,7 +511,7 @@ const IN_ETFS=[
   {ticker:'SILVERBEES.NS',name:'Nippon Silver BeES',                   sector:'🇮🇳 Gold & Commodities', aum:0},
   {ticker:'MAFANG.NS',    name:'Mirae Asset FANG+ ETF',                sector:'🇮🇳 International',      aum:0},
   {ticker:'HNGSNGBEES.NS',name:'Nippon Hang Seng BeES',                sector:'🇮🇳 International',      aum:0},
-  {ticker:'NASDAQ100.NS', name:'Motilal Oswal Nasdaq 100 ETF',         sector:'🇮🇳 International',      aum:0},
+  {ticker:'MON100.NS',    name:'Motilal Oswal Nasdaq 100 ETF',         sector:'🇮🇳 International',      aum:0},
 ];
 
 const US_SECTOR_ORDER=['Technology','Healthcare','Comm. Services','Financials','Energy','Materials','Industrials','Consumer Disc.','Consumer Stap.','Utilities','Real Estate','Emerging Mkts','Commodities','Thematic','Fixed Income'];
@@ -525,33 +525,68 @@ let momMinY1=20, momMinAUM=1, momSortKey='slope';
 
 // ── YAHOO FINANCE FETCHER
 async function fetchChart(ticker){
-  const url=`https://query1.finance.yahoo.com/v8/finance/chart/${ticker}?range=5y&interval=1mo&includePrePost=false`;
+  const url=`https://query1.finance.yahoo.com/v8/finance/chart/${ticker}?range=5y&interval=1wk&includePrePost=false&events=div`;
   const r=await fetch(url,{headers:{'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}});
-  if(!r.ok)throw new Error(r.status);
+  if(!r.ok)throw new Error('HTTP '+r.status);
   const d=await r.json();
-  const res=d?.chart?.result?.[0];if(!res)throw new Error('no result');
-  const meta=res.meta;
+  const res=d?.chart?.result?.[0];
+  if(!res)throw new Error('no chart result for '+ticker);
+  const meta=res.meta||{};
   const ts=res.timestamp||[];
-  const cl=res.indicators?.adjclose?.[0]?.adjclose||res.indicators?.quote?.[0]?.close||[];
-  const price=meta.regularMarketPrice||meta.previousClose;
-  const d1pct=meta.regularMarketChangePercent||null;
-  const nowMs=Date.now();
-  function idxAt(tMs){let b=0,bd=Infinity;ts.forEach((t,i)=>{if(cl[i]==null)return;const diff=Math.abs(t*1000-tMs);if(diff<bd){bd=diff;b=i;}});return b;}
-  function pct(f,t){if(!f||!t)return null;return((t-f)/Math.abs(f))*100;}
-  const cur=cl[cl.length-1]||price;
-  const aum=(meta.totalAssets||0)/1e9||null;
-  const isIndian=ticker.endsWith('.NS');
-  return{
-    price,d1:d1pct,
-    w1:pct(cl[idxAt(nowMs-7*86400000)],cur),
-    m1:pct(cl[idxAt(nowMs-30*86400000)],cur),
-    m3:pct(cl[idxAt(nowMs-91*86400000)],cur),
-    m6:pct(cl[idxAt(nowMs-182*86400000)],cur),
-    ytd:pct(cl[idxAt(new Date(new Date().getFullYear(),0,2).getTime())],cur),
-    y1:pct(cl[idxAt(nowMs-365*86400000)],cur),
-    y5:pct(cl[idxAt(nowMs-5*365*86400000)],cur),
-    aum,isIndian
-  };
+
+  // Try multiple possible locations for close prices
+  let cl = res.indicators?.quote?.[0]?.close
+        || res.indicators?.adjclose?.[0]?.adjclose
+        || [];
+
+  // Filter out null/undefined pairs of (timestamp, close)
+  const pairs = ts.map((t,i)=>[t, cl[i]]).filter(p=>p[1]!=null && !isNaN(p[1]));
+
+  if(pairs.length === 0){
+    console.warn('No valid price history for', ticker, '— using meta only');
+  }
+
+  const price = meta.regularMarketPrice ?? meta.previousClose ?? (pairs.length?pairs[pairs.length-1][1]:null);
+  const d1pct = meta.regularMarketChangePercent ?? null;
+  const nowMs = Date.now();
+
+  function idxAt(targetMs){
+    if(pairs.length===0) return -1;
+    let best=0, bestDiff=Infinity;
+    pairs.forEach((p,i)=>{
+      const diff=Math.abs(p[0]*1000 - targetMs);
+      if(diff<bestDiff){bestDiff=diff;best=i;}
+    });
+    return best;
+  }
+  function pct(from,to){
+    if(from==null||to==null||from===0)return null;
+    return ((to-from)/Math.abs(from))*100;
+  }
+
+  const cur = pairs.length ? pairs[pairs.length-1][1] : price;
+  const aum = meta.totalAssets ? meta.totalAssets/1e9 : null;
+  const isIndian = ticker.endsWith('.NS');
+
+  let w1=null,m1=null,m3=null,m6=null,ytd=null,y1=null,y5=null;
+  if(pairs.length>0 && cur!=null){
+    const i1w=idxAt(nowMs-7*86400000);
+    const i1m=idxAt(nowMs-30*86400000);
+    const i3m=idxAt(nowMs-91*86400000);
+    const i6m=idxAt(nowMs-182*86400000);
+    const iytd=idxAt(new Date(new Date().getFullYear(),0,2).getTime());
+    const i1y=idxAt(nowMs-365*86400000);
+    const i5y=idxAt(nowMs-5*365*86400000);
+    w1  = i1w>=0  ? pct(pairs[i1w][1], cur)  : null;
+    m1  = i1m>=0  ? pct(pairs[i1m][1], cur)  : null;
+    m3  = i3m>=0  ? pct(pairs[i3m][1], cur)  : null;
+    m6  = i6m>=0  ? pct(pairs[i6m][1], cur)  : null;
+    ytd = iytd>=0 ? pct(pairs[iytd][1], cur) : null;
+    y1  = i1y>=0  ? pct(pairs[i1y][1], cur)  : null;
+    y5  = i5y>=0  ? pct(pairs[i5y][1], cur)  : null;
+  }
+
+  return{price,d1:d1pct,w1,m1,m3,m6,ytd,y1,y5,aum,isIndian};
 }
 
 // ── LINEAR REGRESSION SLOPE across [m1,m3,m6,y1]
